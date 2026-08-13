@@ -44,6 +44,9 @@ public sealed class MainForm : Form
     private bool _archiveEncrypted;
     private string? _archivePassword;
 
+    // 归档操作进行中（非模态进度对话框）：防止重叠操作，进入时禁用各入口，finally 恢复。
+    private bool _operationBusy;
+
     public MainForm()
     {
         _currentDir = InitialDirectory();
@@ -77,7 +80,7 @@ public sealed class MainForm : Form
         _compressItem.Click += (_, _) => OnCompress();
         _extractItem.Text = "解压到(&E)...";
         _extractItem.ShortcutKeys = Keys.Control | Keys.E;
-        _extractItem.Enabled = false; // 仅归档视图内可用（UpdateArchiveButtons 动态切换）
+        _extractItem.Enabled = false; // 仅归档视图内可用（UpdateOperationButtons 动态切换）
         _extractItem.Click += (_, _) => OnExtract();
         var commands = new ToolStripMenuItem("命令(&C)");
         commands.DropDownItems.Add(_compressItem);
@@ -484,7 +487,7 @@ public sealed class MainForm : Form
         _archiveEntries = entries;
         _archivePassword = password; // 仅加密归档可能非 null（供解压/预览复用）
         _archiveEncrypted = entries.Any(e => e.IsEncrypted);
-        UpdateArchiveButtons();
+        UpdateOperationButtons();
         RefreshView();
         UpdateAddressBox();
     }
@@ -498,15 +501,20 @@ public sealed class MainForm : Form
         _archiveEntries.Clear();
         _archivePassword = null;
         _archiveEncrypted = false;
-        UpdateArchiveButtons();
+        UpdateOperationButtons();
     }
 
-    /// <summary>解压入口仅在归档视图可用。</summary>
-    private void UpdateArchiveButtons()
+    /// <summary>操作入口可用性：归档操作进行中全部禁用；空闲时解压仅归档视图可用。</summary>
+    private void UpdateOperationButtons()
     {
-        var inArchive = _archivePath != null;
-        _extractItem.Enabled = inArchive;
+        var idle = !_operationBusy;
+        var inArchive = _archivePath != null && idle;
+        _toolCompress.Enabled = idle;
+        _toolOpenArchive.Enabled = idle;
+        _compressItem.Enabled = idle;
+        _openArchiveItem.Enabled = idle;
         _toolExtract.Enabled = inArchive;
+        _extractItem.Enabled = inArchive;
     }
 
     // ---- 事件 ----
@@ -571,6 +579,7 @@ public sealed class MainForm : Form
 
     private async void OnCompress()
     {
+        if (_operationBusy) return;
         var sources = SelectedSourcePaths();
         using var dlg = new CompressDialog(sources);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
@@ -584,7 +593,12 @@ public sealed class MainForm : Form
         var service = format == "mwr" ? (IArchiveService)new MwrService() : new ZipService();
         var result = await RunArchiveOperation("正在压缩...",
             (p, ct) => service.Compress(sources, target, level, password, p, ct));
-        if (!result.Success) return;
+        var error = result.Error;
+        if (!result.Success)
+        {
+            if (error is not null) ShowOperationError(error); // 失败弹错；取消保持静默
+            return;
+        }
 
         RefreshView();
         MessageBox.Show(this,
@@ -594,6 +608,7 @@ public sealed class MainForm : Form
 
     private async void OnExtract()
     {
+        if (_operationBusy) return;
         if (_archivePath == null || _archiveService == null) return;
         using var dlg = new ExtractDialog(_archiveEncrypted);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
@@ -604,7 +619,12 @@ public sealed class MainForm : Form
         var archivePath = _archivePath;
         var result = await RunArchiveOperation("正在解压...",
             (p, ct) => service.Extract(archivePath, targetDir, password, null, p, ct));
-        if (!result.Success) return;
+        var error = result.Error;
+        if (!result.Success)
+        {
+            if (error is not null) ShowOperationError(error); // 失败弹错；取消保持静默
+            return;
+        }
 
         RefreshView();
         MessageBox.Show(this,
@@ -614,6 +634,7 @@ public sealed class MainForm : Form
 
     private async void OnOpenArchive()
     {
+        if (_operationBusy) return;
         string? path;
         using (var ofd = new OpenFileDialog
         {
@@ -650,6 +671,7 @@ public sealed class MainForm : Form
                 EnterArchiveMode(path, service, result.Value!, password);
                 return;
             }
+            if (result.Cancelled) return; // 用户取消打开，保持静默（状态栏已提示）
             if (result.Error is InvalidPasswordException)
             {
                 password = PromptPassword(path);
@@ -663,13 +685,19 @@ public sealed class MainForm : Form
 
     private async Task PreviewArchiveEntry(ArchiveEntryTag tag)
     {
+        if (_operationBusy) return;
         if (_archivePath == null || _archiveService == null) return;
         var service = _archiveService;
         var archivePath = _archivePath;
         var password = _archivePassword;
         var result = await RunArchiveOperation("正在预览...",
             (p, ct) => service.Preview(archivePath, tag.EntryName, password));
-        if (!result.Success) return;
+        var error = result.Error;
+        if (!result.Success)
+        {
+            if (error is not null) ShowOperationError(error); // 失败弹错；取消保持静默
+            return;
+        }
         ShowPreview(tag.EntryName, result.Value!);
     }
 
@@ -681,26 +709,36 @@ public sealed class MainForm : Form
         string progressTitle,
         Func<IProgress<ProgressInfo>, CancellationToken, T> operation)
     {
-        using var progress = new ProgressDialog(progressTitle);
-        progress.Show(this);
+        _operationBusy = true;
+        UpdateOperationButtons();
         try
         {
-            var value = await Task.Run(() => operation(progress.Progress, progress.Token));
-            progress.Complete();
-            await Task.Delay(150); // 让"完成"状态短暂可见再关闭
-            CloseProgressDialog(progress);
-            return OpResult<T>.Ok(value);
+            using var progress = new ProgressDialog(progressTitle);
+            progress.Show(this);
+            try
+            {
+                var value = await Task.Run(() => operation(progress.Progress, progress.Token));
+                progress.Complete();
+                await Task.Delay(150); // 让"完成"状态短暂可见再关闭
+                CloseProgressDialog(progress);
+                return OpResult<T>.Ok(value);
+            }
+            catch (OperationCanceledException)
+            {
+                CloseProgressDialog(progress);
+                _statusInfo.Text = "操作已取消。";
+                return OpResult<T>.Cancel();
+            }
+            catch (Exception e) when (e is not OutOfMemoryException and not StackOverflowException)
+            {
+                CloseProgressDialog(progress);
+                return OpResult<T>.Fail(e);
+            }
         }
-        catch (OperationCanceledException)
+        finally
         {
-            CloseProgressDialog(progress);
-            _statusInfo.Text = "操作已取消。";
-            return OpResult<T>.Cancel();
-        }
-        catch (Exception e) when (e is not OutOfMemoryException and not StackOverflowException)
-        {
-            CloseProgressDialog(progress);
-            return OpResult<T>.Fail(e);
+            _operationBusy = false;
+            UpdateOperationButtons();
         }
     }
 
@@ -921,6 +959,7 @@ public sealed class MainForm : Form
             var ext = Path.GetExtension(first).ToLowerInvariant();
             if (ext == ".zip" || ext == ".mwr")
             {
+                if (_operationBusy) return; // 操作进行中忽略拖入归档，避免覆盖视图
                 _ = OpenArchivePath(first); // 拖入归档 → 打开归档视图
                 return;
             }
