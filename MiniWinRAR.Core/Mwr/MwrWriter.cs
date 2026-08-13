@@ -135,12 +135,17 @@ public class MwrWriter : IDisposable
         if (_finished) throw new InvalidOperationException("归档已 finish，不能再写入或重复 finish。");
     }
 
-    private void Write(byte[] bytes) => _output.Write(bytes, 0, bytes.Length);
+    private void Write(byte[] bytes)
+    {
+        _output.Write(bytes, 0, bytes.Length);
+        _offset += bytes.Length;
+    }
 
     private void WriteUInt64Le(ulong value)
     {
         Span<byte> buf = stackalloc byte[8];
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(buf, value);
         _output.Write(buf);
+        _offset += 8;
     }
 }

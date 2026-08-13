@@ -132,6 +132,36 @@ public class MwrWriterTests
     }
 
     [Fact]
+    public void Layout_MultipleEntries_DataOffsetChainAdvances()
+    {
+        var data0 = "first file payload 第一"u8.ToArray();
+        var data1 = "second file payload 第二"u8.ToArray();
+        using var ms = new MemoryStream();
+        using (var w = new MwrWriter(ms, null))
+        {
+            w.AddFile("a.txt", data0, 0, CompressionLevel.Fast);
+            w.AddFile("b.txt", data1, 0, CompressionLevel.Best);
+            w.Finish();
+        }
+
+        var bytes = ms.ToArray();
+        var headerLen = (int)BitConverter.ToUInt64(bytes.AsSpan(bytes.Length - 8, 8));
+        var headerBlock = bytes[(int)(bytes.Length - 8 - headerLen)..^8];
+        var entries = MwrFormat.Deserialize(headerBlock);
+
+        Assert.Equal(2, entries.Count);
+        Assert.Equal(22L, entries[0].DataOffset);                       // 第一个条目在固定头之后
+        Assert.Equal(entries[0].CompressedSize, entries[1].DataOffset - entries[0].DataOffset);
+        // 非加密条目无 nonce，payload = zstd 压缩体，故 offset 链 = 22 + N0
+        Assert.Equal(22L + entries[0].CompressedSize, entries[1].DataOffset);
+
+        // 用 entries[1].DataOffset 直接定位并解压第二个条目数据
+        var entry1Data = bytes[(int)entries[1].DataOffset..(int)(bytes.Length - 8 - headerLen)];
+        Assert.Equal(entries[1].CompressedSize, entry1Data.Length);
+        Assert.Equal(data1, Zstd.Decompress(entry1Data, data1.Length));
+    }
+
+    [Fact]
     public void AddFile_EmptyData_ProducesValidArchive()
     {
         using var ms = new MemoryStream();
