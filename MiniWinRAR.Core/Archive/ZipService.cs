@@ -26,7 +26,14 @@ public class ZipService : IArchiveService
             if (Directory.Exists(full))
             {
                 var rootLen = full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Length + 1;
-                foreach (var f in Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories))
+                // 与 .mwr 的 FileCollector 语义一致：跳过 reparse point（symlink/junction），
+                // 绝不跟随——否则会归档所选目录之外的数据，环形 junction 还会无限递归。
+                foreach (var f in Directory.EnumerateFiles(full, "*", new EnumerationOptions
+                {
+                    RecurseSubdirectories = true,
+                    IgnoreInaccessible = true,
+                    AttributesToSkip = FileAttributes.Hidden | FileAttributes.System | FileAttributes.ReparsePoint
+                }))
                 {
                     ct.ThrowIfCancellationRequested();
                     var rel = f[rootLen..].Replace('\\', '/');
@@ -170,7 +177,9 @@ public class ZipService : IArchiveService
         if (entry is null) throw new ArchiveCorruptedException($"归档中不存在条目: {entryName}");
         if (entry.IsDirectory) return new PreviewResult("binary", null, null);
 
-        var length = (int)Math.Min(entry.Size, PreviewCap);
+        // 流式/备份 zip 中条目大小可能未知（Size == -1），此时退化为读取整个预览上限，
+        // 下方的读取循环已在 EOF 处截断，故不会越界。
+        var length = (int)(entry.Size >= 0 ? Math.Min(entry.Size, PreviewCap) : PreviewCap);
         var bytes = new byte[length];
         using (var src = zip.GetInputStream(entry))
         {

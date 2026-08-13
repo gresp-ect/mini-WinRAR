@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using ICSharpCode.SharpZipLib.Zip;
 using MiniWinRAR.Core.Archive;
@@ -219,12 +220,180 @@ public class ZipServiceTests : IDisposable
         Assert.Contains("report.txt", ex2.Message);
     }
 
+    [Fact]
+    public void Compress_SkipsJunction_DoesNotArchiveOutside()
+    {
+        // 目录 junction（reparse point）指向所选目录之外：压缩时不得跟随，
+        // 否则会把 junction 目标里的数据一并归档（数据外泄）。
+        var src = SrcDir;
+        Directory.CreateDirectory(src);
+        File.WriteAllText(Path.Combine(src, "real.txt"), "x");
+        var outside = Path.Combine(_root, "outside");
+        Directory.CreateDirectory(outside);
+        File.WriteAllText(Path.Combine(outside, "leak.txt"), "secret");
+
+        var link = Path.Combine(src, "link");
+        Assert.True(TryCreateDirJunction(link, outside), "junction 创建失败");
+
+        var svc = new ZipService();
+        var stats = svc.Compress(new[] { src }, ZipPath, CompressionLevel.Fast, null, null!, CancellationToken.None);
+
+        var entries = svc.List(ZipPath, null);
+        Assert.Equal(1, stats.EntryCount);
+        Assert.Contains(entries, e => e.Name == "real.txt");
+        Assert.DoesNotContain(entries, e => e.Name == "link");
+        Assert.DoesNotContain(entries, e => e.Name == "leak.txt");      // junction 目标不得被归档
+        Assert.DoesNotContain(entries, e => e.Name.Contains("leak"));   // 不得归档所选目录之外的文件
+    }
+
+    [Fact]
+    public void Compress_ReparsePointCycle_DoesNotCrash()
+    {
+        // loop/loop -> loop 自引用环：若不跳过 reparse point 会无限递归导致
+        // PathTooLongException，压缩失败并留下残缺 zip。
+        var src = SrcDir;
+        Directory.CreateDirectory(Path.Combine(src, "loop"));
+        File.WriteAllText(Path.Combine(src, "loop", "a.txt"), "x");
+
+        var link = Path.Combine(src, "loop", "loop");
+        Assert.True(TryCreateDirJunction(link, Path.Combine(src, "loop")), "junction 创建失败");
+
+        var svc = new ZipService();
+        var stats = svc.Compress(new[] { src }, ZipPath, CompressionLevel.Fast, null, null!, CancellationToken.None);
+
+        Assert.Equal(1, stats.EntryCount);
+        var entries = svc.List(ZipPath, null);
+        Assert.Contains(entries, e => e.Name == "loop/a.txt");
+        Assert.DoesNotContain(entries, e => e.Name.Contains("loop/loop"));
+    }
+
+    [Fact]
+    public void Preview_UnknownSizeEntry_DoesNotCrash()
+    {
+        // 流式/备份 zip 里条目大小未知：ZIP64 extra 中 usize=0xFFFFFFFFFFFFFFFF 时
+        // SharpZipLib 读回 Size == -1。Preview 必须容忍，不能 new byte[-1] 抛
+        // ArgumentOutOfRangeException。
+        var data = "hello unknown size preview"u8.ToArray();
+        BuildZip64UnknownSizeArchive(ZipPath, "note.txt", data);
+
+        var svc = new ZipService();
+        var result = svc.Preview(ZipPath, "note.txt", null);
+
+        Assert.Equal("text", result.Kind);
+        Assert.Equal("hello unknown size preview", result.Text);
+        Assert.Equal(data, result.Bytes);
+    }
+
     private static void PutEntry(ZipOutputStream zip, string name, byte[] data)
     {
         var e = new ZipEntry(name);
         zip.PutNextEntry(e);
         zip.Write(data, 0, data.Length);
         zip.CloseEntry();
+    }
+
+    /// <summary>
+    /// 用 mklink /J 创建目录 junction（reparse point）。无需管理员即可在 NTFS 上创建；
+    /// 创建失败（非 NTFS 等）时返回 false 并让测试显式失败，避免静默通过。
+    /// </summary>
+    private static bool TryCreateDirJunction(string junctionPath, string targetPath)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            Arguments = $"/c mklink /J \"{junctionPath}\" \"{targetPath}\"",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        try
+        {
+            using var p = Process.Start(psi);
+            p!.WaitForExit();
+            return p.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 手工构造一个条目大小未知的 zip：中央目录 usize/csize 为 0xFFFFFFFF 哨兵值，
+    /// ZIP64 extra 字段中 usize 写 0xFFFFFFFFFFFFFFFF。SharpZipLib 读回时 Size == -1，
+    /// 但 GetInputStream 仍能按实际字节读取——正是流式/备份 zip 里"大小未知条目"的真实形态。
+    /// </summary>
+    private static void BuildZip64UnknownSizeArchive(string path, string entryName, byte[] data)
+    {
+        uint dosTime = (uint)(((2024 - 1980) << 25) | (5 << 21) | (1 << 16) | (12 << 11) | (30 << 5) | (45 / 2));
+        var crc = new ICSharpCode.SharpZipLib.Checksum.Crc32();
+        crc.Update(data);
+        byte[] name = Encoding.UTF8.GetBytes(entryName);
+
+        // ZIP64 extra：id(0x0001) + len(16) + usize(8B=0xFFFFFFFFFFFFFFFF) + csize(8B=实际压缩后大小)
+        var extra = new byte[4 + 16];
+        WriteU16(extra, 0, 0x0001);
+        WriteU16(extra, 2, 16);
+        for (int i = 0; i < 8; i++) extra[4 + i] = 0xFF; // usize 未知
+        long csize = data.Length;
+        for (int i = 0; i < 8; i++) extra[12 + i] = (byte)((csize >> (8 * i)) & 0xFF);
+
+        const long offset = 0;
+        using (var w = new BinaryWriter(File.Create(path)))
+        {
+            // 本地文件头：version 45（zip64），size 字段为 0xFFFFFFFF 哨兵 + zip64 extra
+            w.Write(0x04034b50);
+            w.Write((ushort)45);
+            w.Write((ushort)0);        // flags
+            w.Write((ushort)0);        // stored
+            w.Write(dosTime);
+            w.Write((uint)crc.Value);
+            w.Write((uint)0xFFFFFFFF); // csize 哨兵
+            w.Write((uint)0xFFFFFFFF); // usize 哨兵
+            w.Write((ushort)name.Length);
+            w.Write((ushort)extra.Length);
+            w.Write(name);
+            w.Write(extra);
+            w.Write(data);
+
+            // 中央目录
+            long cdPos = w.BaseStream.Position;
+            w.Write(0x02014b50);
+            w.Write((ushort)45);
+            w.Write((ushort)45);
+            w.Write((ushort)0);
+            w.Write((ushort)0);
+            w.Write(dosTime);
+            w.Write((uint)crc.Value);
+            w.Write((uint)0xFFFFFFFF); // csize 哨兵
+            w.Write((uint)0xFFFFFFFF); // usize 哨兵
+            w.Write((ushort)name.Length);
+            w.Write((ushort)extra.Length);
+            w.Write((ushort)0);
+            w.Write((ushort)0);
+            w.Write((ushort)0);
+            w.Write((uint)0);
+            w.Write((uint)offset);
+            w.Write(name);
+            w.Write(extra);
+
+            // 中央目录末尾记录
+            w.Write(0x06054b50);
+            w.Write((ushort)0);
+            w.Write((ushort)0);
+            w.Write((ushort)1);
+            w.Write((ushort)1);
+            w.Write((uint)(w.BaseStream.Position - cdPos));
+            w.Write((uint)cdPos);
+            w.Write((ushort)0);
+        }
+    }
+
+    private static void WriteU16(byte[] buf, int off, ushort v)
+    {
+        buf[off] = (byte)(v & 0xFF);
+        buf[off + 1] = (byte)((v >> 8) & 0xFF);
     }
 }
 
