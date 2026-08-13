@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-ssr/
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# Tauri / Rust
+*.pdb
+*.msi
+*.exe
+*.dll
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+credentials/
+secrets/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Test / coverage
+coverage/
+*.lcov
