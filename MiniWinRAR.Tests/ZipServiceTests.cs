@@ -193,6 +193,32 @@ public class ZipServiceTests : IDisposable
         Assert.Equal("B"u8.ToArray(), File.ReadAllBytes(Path.Combine(OutDir, "sub", "b.txt")));
     }
 
+    [Fact]
+    public void Compress_DuplicateEntryNames_Throws()
+    {
+        // 两个不同目录下同名文件 → 目录压缩会得到相同条目名，必须拒绝而非静默覆盖
+        var srcA = Path.Combine(SrcDir, "A");
+        var srcB = Path.Combine(SrcDir, "B");
+        Directory.CreateDirectory(srcA);
+        Directory.CreateDirectory(srcB);
+        File.WriteAllBytes(Path.Combine(srcA, "report.txt"), "A"u8.ToArray());
+        File.WriteAllBytes(Path.Combine(srcB, "report.txt"), "B"u8.ToArray());
+
+        var svc = new ZipService();
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            svc.Compress(new[] { srcA, srcB }, ZipPath, CompressionLevel.Fast, null, null!, CancellationToken.None));
+        Assert.Contains("report.txt", ex.Message);
+        Assert.False(File.Exists(ZipPath), "检测到重复后不应产出归档文件");
+
+        // 两个不同目录下的同名文件直接作为文件路径压缩，同样应拒绝
+        var zip2 = Path.Combine(_root, "b.zip");
+        var ex2 = Assert.Throws<InvalidOperationException>(() =>
+            svc.Compress(
+                new[] { Path.Combine(srcA, "report.txt"), Path.Combine(srcB, "report.txt") },
+                zip2, CompressionLevel.Fast, null, null!, CancellationToken.None));
+        Assert.Contains("report.txt", ex2.Message);
+    }
+
     private static void PutEntry(ZipOutputStream zip, string name, byte[] data)
     {
         var e = new ZipEntry(name);

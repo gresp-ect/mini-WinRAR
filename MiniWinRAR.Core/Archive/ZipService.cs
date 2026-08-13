@@ -18,6 +18,7 @@ public class ZipService : IArchiveService
     {
         // 收集（源绝对路径 → 归档内 '/' 相对名），并汇总未压缩总大小作为进度分母。
         var files = new List<(string FullPath, string EntryName)>();
+        var seen = new HashSet<string>(StringComparer.Ordinal); // 防同名条目在 zip 中静默覆盖
         long totalSize = 0;
         foreach (var p in paths)
         {
@@ -28,13 +29,17 @@ public class ZipService : IArchiveService
                 foreach (var f in Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories))
                 {
                     ct.ThrowIfCancellationRequested();
-                    files.Add((f, f[rootLen..].Replace('\\', '/')));
+                    var rel = f[rootLen..].Replace('\\', '/');
+                    if (!seen.Add(rel)) throw new InvalidOperationException($"duplicate entry name: {rel}");
+                    files.Add((f, rel));
                     totalSize += new FileInfo(f).Length;
                 }
             }
             else if (File.Exists(full))
             {
-                files.Add((full, Path.GetFileName(full)));
+                var name = Path.GetFileName(full);
+                if (!seen.Add(name)) throw new InvalidOperationException($"duplicate entry name: {name}");
+                files.Add((full, name));
                 totalSize += new FileInfo(full).Length;
             }
             else
