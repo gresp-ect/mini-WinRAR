@@ -1,13 +1,16 @@
-using System.IO;
+using System.Diagnostics;
 using System.Drawing;
+using System.IO;
 using System.Windows.Forms;
+using MiniWinRAR.Core.Archive;
+using MiniWinRAR.Core.Crypto;
 
 namespace MiniWinRAR;
 
 /// <summary>
 /// 主窗口：WinRAR 经典布局（菜单栏 / 工具栏 / 地址栏 / 文件列表 / 状态栏）。
-/// 本任务实现文件系统浏览；归档操作（压缩 / 解压 / 打开归档 / 预览 / 拖拽）
-/// 由任务 9 对话框与任务 10 事件接线完成。
+/// 支持文件系统浏览与归档视图（打开 .zip/.mwr 后列出条目）；压缩 / 解压 / 预览
+/// 一律在后台线程执行，经 ProgressDialog 上报进度并支持取消。
 /// </summary>
 public sealed class MainForm : Form
 {
@@ -20,7 +23,7 @@ public sealed class MainForm : Form
     private readonly ToolStripStatusLabel _statusPath = new();
     private readonly ToolStripStatusLabel _statusInfo = new();
 
-    // 归档操作入口：本任务保持禁用，任务 10 启用并接线到对话框 + IArchiveService。
+    // 归档操作入口（工具栏 + 菜单共用同一批处理器）
     private readonly ToolStripMenuItem _openArchiveItem = new();
     private readonly ToolStripMenuItem _compressItem = new();
     private readonly ToolStripMenuItem _extractItem = new();
@@ -33,6 +36,13 @@ public sealed class MainForm : Form
     private string _currentDir;
     private long _dirTotalSize;
     private int _dirItemCount;
+
+    // 归档视图状态：_archivePath 非 null 时列表显示归档条目而非文件系统目录
+    private string? _archivePath;
+    private IArchiveService? _archiveService;
+    private List<ArchiveEntry> _archiveEntries = new();
+    private bool _archiveEncrypted;
+    private string? _archivePassword;
 
     public MainForm()
     {
@@ -53,7 +63,8 @@ public sealed class MainForm : Form
     {
         _openArchiveItem.Text = "打开归档(&O)...";
         _openArchiveItem.ShortcutKeys = Keys.Control | Keys.O;
-        _openArchiveItem.Enabled = false; // 任务 10 接线
+        _openArchiveItem.Enabled = true;
+        _openArchiveItem.Click += (_, _) => OnOpenArchive();
         var exit = new ToolStripMenuItem("退出(&X)", null, (_, _) => Close());
         var file = new ToolStripMenuItem("文件(&F)");
         file.DropDownItems.Add(_openArchiveItem);
@@ -62,10 +73,12 @@ public sealed class MainForm : Form
 
         _compressItem.Text = "压缩(&A)...";
         _compressItem.ShortcutKeys = Keys.Control | Keys.A;
-        _compressItem.Enabled = false; // 任务 10 接线
+        _compressItem.Enabled = true;
+        _compressItem.Click += (_, _) => OnCompress();
         _extractItem.Text = "解压到(&E)...";
         _extractItem.ShortcutKeys = Keys.Control | Keys.E;
-        _extractItem.Enabled = false; // 任务 10 接线
+        _extractItem.Enabled = false; // 仅归档视图内可用（UpdateArchiveButtons 动态切换）
+        _extractItem.Click += (_, _) => OnExtract();
         var commands = new ToolStripMenuItem("命令(&C)");
         commands.DropDownItems.Add(_compressItem);
         commands.DropDownItems.Add(_extractItem);
@@ -91,9 +104,12 @@ public sealed class MainForm : Form
 
     private void BuildToolStrip()
     {
-        _toolCompress.Enabled = false;   // 任务 10 接线
-        _toolExtract.Enabled = false;    // 任务 10 接线
-        _toolOpenArchive.Enabled = false; // 任务 10 接线
+        _toolCompress.Enabled = true;
+        _toolCompress.Click += (_, _) => OnCompress();
+        _toolExtract.Enabled = false; // 仅归档视图内可用
+        _toolExtract.Click += (_, _) => OnExtract();
+        _toolOpenArchive.Enabled = true;
+        _toolOpenArchive.Click += (_, _) => OnOpenArchive();
         var refresh = new ToolStripButton("刷新", null, (_, _) => RefreshView());
         var goUp = new ToolStripButton("返回上级", null, (_, _) => GoUp());
 
@@ -151,7 +167,7 @@ public sealed class MainForm : Form
         _fileList.FullRowSelect = true;
         _fileList.MultiSelect = true;
         _fileList.HideSelection = false;
-        _fileList.AllowDrop = true; // 拖拽事件（DragEnter/DragDrop）由任务 10 接线
+        _fileList.AllowDrop = true;
         _fileList.Columns.Add("名称", 360);
         _fileList.Columns.Add("大小", 100, HorizontalAlignment.Right);
         _fileList.Columns.Add("类型", 150);
@@ -159,6 +175,8 @@ public sealed class MainForm : Form
         _fileList.ItemActivate += OnFileListActivate;
         _fileList.SelectedIndexChanged += (_, _) => UpdateStatus();
         _fileList.KeyDown += OnFileListKeyDown;
+        _fileList.DragEnter += OnDragEnter;
+        _fileList.DragDrop += OnDragDrop;
         Controls.Add(_fileList);
     }
 
@@ -180,7 +198,9 @@ public sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(960, 620);
         MinimumSize = new Size(600, 380);
-        AllowDrop = true; // 拖拽事件由任务 10 接线
+        AllowDrop = true;
+        DragEnter += OnDragEnter; // 空白区也可接受拖拽
+        DragDrop += OnDragDrop;
         _fileList.Resize += (_, _) => FitNameColumn();
     }
 
@@ -219,6 +239,7 @@ public sealed class MainForm : Form
 
     private void NavigateTo(string path)
     {
+        ExitArchiveMode(); // 进入文件系统目录即退出归档视图
         var resolved = ResolveDirectory(path);
         if (resolved == null)
         {
@@ -234,6 +255,12 @@ public sealed class MainForm : Form
 
     private void RefreshView()
     {
+        if (_archivePath != null)
+        {
+            RefreshArchiveView();
+            return;
+        }
+
         _dirTotalSize = 0;
         _dirItemCount = 0;
         string? listingError = null;
@@ -334,6 +361,13 @@ public sealed class MainForm : Form
 
     private void GoUp()
     {
+        if (_archivePath != null)
+        {
+            ExitArchiveMode();
+            RefreshView();
+            UpdateAddressBox();
+            return;
+        }
         var parent = Directory.GetParent(_currentDir);
         if (parent != null) NavigateTo(parent.FullName);
     }
@@ -342,6 +376,9 @@ public sealed class MainForm : Form
     {
         var text = _addressBox.Text;
         if (string.IsNullOrWhiteSpace(text)) return;
+        // 归档视图内地址栏显示归档路径：文本未变时不重复跳转（否则误报"无法打开该路径"）
+        if (_archivePath != null && string.Equals(text.Trim().Trim('"'), _archivePath, StringComparison.OrdinalIgnoreCase))
+            return;
         NavigateTo(text);
         UpdateAddressBox();
     }
@@ -354,7 +391,7 @@ public sealed class MainForm : Form
         foreach (var h in _history.Take(20)) _addressBox.Items.Add(h);
     }
 
-    private void UpdateAddressBox() => _addressBox.Text = _currentDir;
+    private void UpdateAddressBox() => _addressBox.Text = _archivePath ?? _currentDir;
 
     private void UpdateStatus(string? listingError = null)
     {
@@ -363,7 +400,12 @@ public sealed class MainForm : Form
             long total = 0;
             foreach (ListViewItem i in _fileList.SelectedItems)
             {
-                total += (i.Tag as EntryTag)?.Size ?? 0;
+                total += i.Tag switch
+                {
+                    EntryTag e => e.Size,
+                    ArchiveEntryTag a => a.Size,
+                    _ => 0,
+                };
             }
             _statusInfo.Text = $"已选 {_fileList.SelectedItems.Count} 项 · 共 {FormatSize(total)}";
         }
@@ -372,9 +414,10 @@ public sealed class MainForm : Form
             _statusInfo.Text = $"{_dirItemCount} 个对象 · {FormatSize(_dirTotalSize)}";
         }
 
+        var current = _archivePath ?? _currentDir;
         _statusPath.Text = string.IsNullOrEmpty(listingError)
-            ? _currentDir
-            : _currentDir + "（部分内容无法读取）";
+            ? current
+            : current + "（部分内容无法读取）";
     }
 
     /// <summary>名称列自动拉伸占满剩余宽度。</summary>
@@ -387,16 +430,107 @@ public sealed class MainForm : Form
         _fileList.Columns[0].Width = name;
     }
 
+    // ---- 归档视图 ----
+
+    /// <summary>列出归档条目（只读的内存元数据，进入归档视图）。</summary>
+    private void RefreshArchiveView()
+    {
+        _dirTotalSize = 0;
+        _dirItemCount = 0;
+
+        _fileList.BeginUpdate();
+        try
+        {
+            _fileList.Items.Clear();
+
+            // 返回上级项：退回归档所在目录的文件系统视图
+            var up = new ListViewItem("..");
+            up.SubItems.Add("");          // 大小
+            up.SubItems.Add("文件夹");    // 类型
+            up.SubItems.Add("");          // 修改时间
+            up.Tag = new ArchiveEntryTag("", 0, IsDir: true, IsUp: true);
+            _fileList.Items.Add(up);
+
+            foreach (var entry in _archiveEntries
+                         .OrderBy(e => e.IsDir ? 0 : 1)
+                         .ThenBy(e => e.Name, StringComparer.CurrentCultureIgnoreCase))
+            {
+                var item = new ListViewItem((entry.IsDir ? "📁  " : "") + entry.Name);
+                item.SubItems.Add(entry.IsDir ? "" : FormatSize(entry.Size));   // 大小
+                var typeText = entry.IsDir ? "文件夹" : GetTypeText(Path.GetExtension(entry.Name));
+                if (entry.IsEncrypted) typeText += "（加密）";                   // 类型
+                item.SubItems.Add(typeText);
+                item.SubItems.Add(entry.Mtime.ToLocalTime().ToString("yyyy-MM-dd HH:mm")); // 修改时间
+                item.Tag = new ArchiveEntryTag(entry.Name, entry.Size, entry.IsDir, false);
+                _fileList.Items.Add(item);
+                _dirItemCount++;
+                if (!entry.IsDir) _dirTotalSize += entry.Size;
+            }
+        }
+        finally
+        {
+            _fileList.EndUpdate();
+        }
+
+        FitNameColumn();
+        UpdateStatus();
+    }
+
+    /// <summary>切换为归档视图：记录归档路径 / 服务 / 条目，解压按钮启用。</summary>
+    private void EnterArchiveMode(string path, IArchiveService service, List<ArchiveEntry> entries, string? password)
+    {
+        _archivePath = path;
+        _archiveService = service;
+        _archiveEntries = entries;
+        _archivePassword = password; // 仅加密归档可能非 null（供解压/预览复用）
+        _archiveEncrypted = entries.Any(e => e.IsEncrypted);
+        UpdateArchiveButtons();
+        RefreshView();
+        UpdateAddressBox();
+    }
+
+    /// <summary>退出归档视图（仅重置状态，由调用方负责刷新）。</summary>
+    private void ExitArchiveMode()
+    {
+        if (_archivePath == null) return;
+        _archivePath = null;
+        _archiveService = null;
+        _archiveEntries.Clear();
+        _archivePassword = null;
+        _archiveEncrypted = false;
+        UpdateArchiveButtons();
+    }
+
+    /// <summary>解压入口仅在归档视图可用。</summary>
+    private void UpdateArchiveButtons()
+    {
+        var inArchive = _archivePath != null;
+        _extractItem.Enabled = inArchive;
+        _toolExtract.Enabled = inArchive;
+    }
+
     // ---- 事件 ----
 
     private void OnFileListActivate(object? sender, EventArgs e)
     {
         if (_fileList.SelectedItems.Count == 0) return;
+
+        if (_archivePath != null)
+        {
+            if (_fileList.SelectedItems[0].Tag is ArchiveEntryTag atag)
+            {
+                if (atag.IsUp) { GoUp(); return; }
+                if (atag.IsDir) return;           // 目录不进入（迷你版不展开子目录）
+                _ = PreviewArchiveEntry(atag);    // 文件双击 → 预览
+            }
+            return;
+        }
+
         var tag = _fileList.SelectedItems[0].Tag as EntryTag;
         if (tag == null) return;
         if (tag.IsUp) { GoUp(); return; }
         if (tag.IsDir) { NavigateTo(tag.FullPath); return; }
-        // 文件双击（打开/预览）由任务 10 接线。
+        OpenFileViaShell(tag.FullPath); // 文件双击 → 系统默认方式打开
     }
 
     private void OnFileListKeyDown(object? sender, KeyEventArgs e)
@@ -433,10 +567,406 @@ public sealed class MainForm : Form
             "关于 Mini-WinRAR", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
+    // ---- 压缩 / 解压 / 打开归档 / 预览（全部后台执行 + 进度 + 取消）----
+
+    private async void OnCompress()
+    {
+        var sources = SelectedSourcePaths();
+        using var dlg = new CompressDialog(sources);
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        var format = dlg.Format;
+        var level = dlg.Level;
+        var password = dlg.Password;
+
+        var target = AskSaveTarget(format);
+        if (target == null) return;
+
+        var service = format == "mwr" ? (IArchiveService)new MwrService() : new ZipService();
+        var result = await RunArchiveOperation("正在压缩...",
+            (p, ct) => service.Compress(sources, target, level, password, p, ct));
+        if (!result.Success) return;
+
+        RefreshView();
+        MessageBox.Show(this,
+            $"压缩完成：{result.Value!.EntryCount} 个条目，共 {FormatSize(result.Value.TotalSize)}。\n{target}",
+            "压缩完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private async void OnExtract()
+    {
+        if (_archivePath == null || _archiveService == null) return;
+        using var dlg = new ExtractDialog(_archiveEncrypted);
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        var targetDir = dlg.TargetDirectory;
+        var password = dlg.Password ?? _archivePassword; // 未填则复用打开归档时的密码
+
+        var service = _archiveService;
+        var archivePath = _archivePath;
+        var result = await RunArchiveOperation("正在解压...",
+            (p, ct) => service.Extract(archivePath, targetDir, password, null, p, ct));
+        if (!result.Success) return;
+
+        RefreshView();
+        MessageBox.Show(this,
+            $"解压完成：{result.Value!.EntryCount} 个条目，共 {FormatSize(result.Value.TotalSize)}。\n{targetDir}",
+            "解压完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private async void OnOpenArchive()
+    {
+        string? path;
+        using (var ofd = new OpenFileDialog
+        {
+            Title = "打开归档",
+            Filter = "归档文件 (*.zip;*.mwr)|*.zip;*.mwr|所有文件 (*.*)|*.*",
+            InitialDirectory = _currentDir,
+        })
+        {
+            if (ofd.ShowDialog(this) != DialogResult.OK) return;
+            path = ofd.FileName;
+        }
+        await OpenArchivePath(path);
+    }
+
+    /// <summary>打开归档（校验扩展名选择服务；密码错则提示重试）。</summary>
+    private async Task OpenArchivePath(string path)
+    {
+        var ext = Path.GetExtension(path).ToLowerInvariant();
+        if (ext != ".zip" && ext != ".mwr")
+        {
+            MessageBox.Show(this, $"无法打开“{Path.GetFileName(path)}”：不是支持的归档格式（.zip / .mwr）。",
+                "打开归档", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var service = CreateService(path);
+        string? password = null;
+        while (true)
+        {
+            var result = await RunArchiveOperation("正在打开归档...",
+                (p, ct) => service.List(path, password));
+            if (result.Success)
+            {
+                EnterArchiveMode(path, service, result.Value!, password);
+                return;
+            }
+            if (result.Error is InvalidPasswordException)
+            {
+                password = PromptPassword(path);
+                if (password == null) return; // 用户取消
+                continue;
+            }
+            ShowOperationError(result.Error!);
+            return;
+        }
+    }
+
+    private async Task PreviewArchiveEntry(ArchiveEntryTag tag)
+    {
+        if (_archivePath == null || _archiveService == null) return;
+        var service = _archiveService;
+        var archivePath = _archivePath;
+        var password = _archivePassword;
+        var result = await RunArchiveOperation("正在预览...",
+            (p, ct) => service.Preview(archivePath, tag.EntryName, password));
+        if (!result.Success) return;
+        ShowPreview(tag.EntryName, result.Value!);
+    }
+
+    /// <summary>
+    /// 在后台线程执行归档操作：非模态 ProgressDialog 显示进度/取消，
+    /// 完成后关闭并返回结果；失败返回异常（调用方决定提示或重试）。
+    /// </summary>
+    private async Task<OpResult<T>> RunArchiveOperation<T>(
+        string progressTitle,
+        Func<IProgress<ProgressInfo>, CancellationToken, T> operation)
+    {
+        using var progress = new ProgressDialog(progressTitle);
+        progress.Show(this);
+        try
+        {
+            var value = await Task.Run(() => operation(progress.Progress, progress.Token));
+            progress.Complete();
+            await Task.Delay(150); // 让"完成"状态短暂可见再关闭
+            CloseProgressDialog(progress);
+            return OpResult<T>.Ok(value);
+        }
+        catch (OperationCanceledException)
+        {
+            CloseProgressDialog(progress);
+            _statusInfo.Text = "操作已取消。";
+            return OpResult<T>.Cancel();
+        }
+        catch (Exception e) when (e is not OutOfMemoryException and not StackOverflowException)
+        {
+            CloseProgressDialog(progress);
+            return OpResult<T>.Fail(e);
+        }
+    }
+
+    /// <summary>安全关闭进度对话框：操作期间用户点 X 关闭后，再次 Close 会抛 ObjectDisposedException。</summary>
+    private static void CloseProgressDialog(ProgressDialog p)
+    {
+        if (p.IsDisposed) return;
+        try { p.Close(); }
+        catch (Exception e) when (e is ObjectDisposedException or InvalidOperationException)
+        {
+            // 对话框已在关闭中/已销毁，忽略
+        }
+    }
+
+    /// <summary>错误统一转友好的中文提示（密码/损坏/取消等分开处理）。</summary>
+    private void ShowOperationError(Exception e)
+    {
+        var (title, message) = e switch
+        {
+            InvalidPasswordException => ("密码错误", e.Message),
+            ArchiveCorruptedException => ("归档文件已损坏", e.Message),
+            FileNotFoundException => ("文件不存在", e.Message),
+            UnauthorizedAccessException => ("访问被拒绝", e.Message),
+            IOException => ("输入/输出错误", e.Message),
+            _ => ("操作失败", e.Message),
+        };
+        MessageBox.Show(this, message, title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+
+    private void ShowPreview(string entryName, PreviewResult preview)
+    {
+        switch (preview.Kind)
+        {
+            case "text":
+                ShowTextPreview(entryName, preview.Text ?? string.Empty);
+                break;
+            case "image" when preview.Bytes is { Length: > 0 }:
+                OpenImageViaShell(entryName, preview.Bytes!); // 落临时文件交给系统查看器
+                break;
+            default:
+                MessageBox.Show(this, $"“{entryName}” 是二进制文件，无法预览。", "预览",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                break;
+        }
+    }
+
+    private void ShowTextPreview(string entryName, string text)
+    {
+        using var form = new Form
+        {
+            Text = "预览 — " + entryName,
+            StartPosition = FormStartPosition.CenterParent,
+            Size = new Size(720, 520),
+            MinimumSize = new Size(400, 300),
+        };
+        var box = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Both,
+            WordWrap = false,
+            Text = text,
+            Font = new Font("Consolas", 10f),
+        };
+        form.Controls.Add(box);
+        form.ShowDialog(this);
+    }
+
+    private void OpenImageViaShell(string entryName, byte[] bytes)
+    {
+        var ext = Path.GetExtension(entryName);
+        if (string.IsNullOrEmpty(ext)) ext = ".img";
+        var tmp = Path.Combine(Path.GetTempPath(), "MiniWinRAR_" + Guid.NewGuid().ToString("N") + ext);
+        try
+        {
+            File.WriteAllBytes(tmp, bytes);
+            Process.Start(new ProcessStartInfo(tmp) { UseShellExecute = true });
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            MessageBox.Show(this, $"无法预览图片：{e.Message}", "预览",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void OpenFileViaShell(string path)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception or ArgumentException)
+        {
+            MessageBox.Show(this, $"无法打开文件：{e.Message}", "Mini-WinRAR",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    /// <summary>询问压缩目标文件；用户取消返回 null。</summary>
+    private string? AskSaveTarget(string format)
+    {
+        var isMwr = format == "mwr";
+        using var sfd = new SaveFileDialog
+        {
+            Title = isMwr ? "压缩为 Mini-WinRAR 归档" : "压缩为 ZIP 压缩文件",
+            Filter = isMwr ? "Mini-WinRAR 归档 (*.mwr)|*.mwr" : "ZIP 压缩文件 (*.zip)|*.zip",
+            AddExtension = true,
+            DefaultExt = isMwr ? "mwr" : "zip",
+            OverwritePrompt = true,
+            InitialDirectory = _currentDir,
+            FileName = SuggestArchiveName(isMwr ? "mwr" : "zip"),
+        };
+        return sfd.ShowDialog(this) == DialogResult.OK ? sfd.FileName : null;
+    }
+
+    /// <summary>按选中项/当前目录建议默认归档名（如 "Documents.zip"）。</summary>
+    private string SuggestArchiveName(string ext)
+    {
+        foreach (ListViewItem i in _fileList.SelectedItems)
+        {
+            if (i.Tag is EntryTag tag && !tag.IsUp && !tag.IsDir)
+                return Path.GetFileNameWithoutExtension(tag.Name) + "." + ext;
+        }
+        var dirName = Path.GetFileName(_currentDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        return (string.IsNullOrEmpty(dirName) ? "archive" : dirName) + "." + ext;
+    }
+
+    /// <summary>压缩源：选中的文件/目录；无选择时压缩当前目录本身。</summary>
+    private List<string> SelectedSourcePaths()
+    {
+        var paths = new List<string>();
+        foreach (ListViewItem i in _fileList.SelectedItems)
+        {
+            if (i.Tag is EntryTag tag && !tag.IsUp) paths.Add(tag.FullPath);
+        }
+        if (paths.Count == 0) paths.Add(_currentDir);
+        return paths;
+    }
+
+    private static IArchiveService CreateService(string path)
+        => Path.GetExtension(path).Equals(".mwr", StringComparison.OrdinalIgnoreCase)
+            ? new MwrService()
+            : new ZipService();
+
+    /// <summary>简单密码输入对话框；用户取消返回 null。</summary>
+    private string? PromptPassword(string archivePath)
+    {
+        using var form = new Form
+        {
+            Text = "输入密码",
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowInTaskbar = false,
+            Size = new Size(430, 160),
+            MinimumSize = new Size(400, 150),
+        };
+
+        var table = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12, 12, 12, 4), ColumnCount = 2, RowCount = 2 };
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        var label = new Label
+        {
+            Text = $"“{Path.GetFileName(archivePath)}” 已加密，请输入密码:",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Margin = new Padding(0, 0, 8, 8),
+        };
+        var box = new TextBox { Dock = DockStyle.Fill, UseSystemPasswordChar = true, Margin = new Padding(0, 0, 0, 8) };
+        table.Controls.Add(label, 0, 0);
+        table.Controls.Add(box, 1, 0);
+
+        var ok = new Button { Text = "确定(&O)", AutoSize = true, DialogResult = DialogResult.OK };
+        var cancel = new Button { Text = "取消(&C)", AutoSize = true, DialogResult = DialogResult.Cancel };
+        ok.Anchor = AnchorStyles.None;
+        cancel.Anchor = AnchorStyles.None;
+        form.AcceptButton = ok;
+        form.CancelButton = cancel;
+        var row = new TableLayoutPanel { Dock = DockStyle.Bottom, Height = 46, ColumnCount = 3, RowCount = 1, Padding = new Padding(12, 8, 12, 8) };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row.Controls.Add(cancel, 1, 0);
+        row.Controls.Add(ok, 2, 0);
+
+        form.Controls.Add(table);
+        form.Controls.Add(row);
+        return form.ShowDialog(this) == DialogResult.OK ? box.Text : null;
+    }
+
+    // ---- 拖拽 ----
+
+    private static void OnDragEnter(object? sender, DragEventArgs e)
+    {
+        e.Effect = e.Data?.GetDataPresent(DataFormats.FileDrop) == true
+            ? DragDropEffects.Copy
+            : DragDropEffects.None;
+    }
+
+    private void OnDragDrop(object? sender, DragEventArgs e)
+    {
+        if (e.Data?.GetData(DataFormats.FileDrop) is not string[] files || files.Length == 0) return;
+        var first = files[0];
+
+        if (Directory.Exists(first))
+        {
+            NavigateTo(first); // 拖入文件夹 → 进入
+            return;
+        }
+        if (File.Exists(first))
+        {
+            var ext = Path.GetExtension(first).ToLowerInvariant();
+            if (ext == ".zip" || ext == ".mwr")
+            {
+                _ = OpenArchivePath(first); // 拖入归档 → 打开归档视图
+                return;
+            }
+            var dir = Path.GetDirectoryName(first);
+            if (!string.IsNullOrEmpty(dir))
+            {
+                NavigateTo(dir); // 普通文件 → 进入其所在目录并选中
+                SelectFile(first);
+            }
+            return;
+        }
+    }
+
+    private void SelectFile(string fullPath)
+    {
+        if (_archivePath != null) return;
+        foreach (ListViewItem i in _fileList.Items)
+        {
+            if (i.Tag is EntryTag tag && !tag.IsUp &&
+                string.Equals(tag.FullPath, fullPath, StringComparison.OrdinalIgnoreCase))
+            {
+                _fileList.SelectedItems.Clear();
+                i.Selected = true;
+                i.Focused = true;
+                _fileList.EnsureVisible(i.Index);
+                return;
+            }
+        }
+    }
+
     // ---- 辅助 ----
 
-    /// <summary>ListView 条目附带的数据（含真实路径与是否为目录/上级）。</summary>
+    /// <summary>ListView 条目附带的数据（文件系统视图：真实路径 + 是否为目录/上级）。</summary>
     private sealed record EntryTag(string Name, string FullPath, bool IsDir, bool IsUp, long Size);
+
+    /// <summary>ListView 条目附带的数据（归档视图：归档内条目名 + 元信息）。</summary>
+    private sealed record ArchiveEntryTag(string EntryName, long Size, bool IsDir, bool IsUp);
+
+    /// <summary>后台归档操作的结果：成功值 / 失败异常 / 用户取消。</summary>
+    private sealed record OpResult<T>(T? Value, Exception? Error, bool Cancelled)
+    {
+        public static OpResult<T> Ok(T value) => new(value, null, false);
+        public static OpResult<T> Fail(Exception error) => new(default, error, false);
+        public static OpResult<T> Cancel() => new(default, null, true);
+        public bool Success => Error is null && !Cancelled;
+    }
 
     private static string FormatSize(long bytes)
     {

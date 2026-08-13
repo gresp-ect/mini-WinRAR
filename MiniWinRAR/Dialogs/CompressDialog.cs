@@ -141,6 +141,13 @@ public sealed class CompressDialog : Form
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
+        // 勾选"使用密码"却留空：直接提交会静默生成未加密归档，属于误操作，拦截并提示。
+        if (_usePasswordCheck.Checked && string.IsNullOrWhiteSpace(_passwordBox.Text))
+        {
+            MessageBox.Show(this, "已勾选“使用密码加密”，请输入密码；不需要加密请取消勾选。", Text,
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
         DialogResult = DialogResult.OK;
     }
 
