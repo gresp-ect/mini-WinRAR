@@ -200,6 +200,10 @@ public sealed class MainForm : Form
         var text = input.Trim().Trim('"'); // 去掉 Explorer 复制路径带的外层引号
         if (text.Length == 0) return null;
 
+        // 裸盘符 "C:" → "C:\"。必须在 GetFullPath 之前规范化：GetFullPath("C:", base)
+        // 会解析为 C 盘的当前目录而非根目录，事后补全分支是死代码。
+        if (text.Length == 2 && text[1] == ':') text += Path.DirectorySeparatorChar;
+
         string full;
         try
         {
@@ -210,8 +214,6 @@ public sealed class MainForm : Form
             return null;
         }
 
-        // 裸盘符 "C:" 补成根路径 "C:\"
-        if (full.Length == 2 && full[1] == ':') full += Path.DirectorySeparatorChar;
         return Directory.Exists(full) ? full : null;
     }
 
