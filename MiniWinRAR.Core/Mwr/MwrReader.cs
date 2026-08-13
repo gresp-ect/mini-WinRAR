@@ -68,7 +68,9 @@ public class MwrReader : IDisposable
             throw new ArchiveCorruptedException("末尾 header 长度无效。");
         if (headerLen > (ulong)(input.Length - 8))
             throw new ArchiveCorruptedException("末尾 header 长度越界。");
-        if (IsEncrypted && headerLen < (ulong)(CryptoService.NonceLen + 1))
+        // 加密分支：密文必须至少容纳 16B GCM tag；否则 ciphertext[..负值] 会在解密前抛
+        // ArgumentOutOfRangeException（捕不到），必须在这里用 ArchiveCorruptedException 拒绝。
+        if (IsEncrypted && headerLen < (ulong)(CryptoService.NonceLen + CryptoService.TagLen))
             throw new ArchiveCorruptedException("加密归档的 header 长度无效。");
         if (headerLen > int.MaxValue)
             throw new ArchiveCorruptedException("末尾 header 长度过大。");
@@ -82,6 +84,10 @@ public class MwrReader : IDisposable
         byte[] headerPlain;
         if (IsEncrypted)
         {
+            // 防御性 guard：解密前确认密文至少能容纳 GCM tag，防止 ciphertext[..负值] 抛
+            // 非 ArchiveCorruptedException 的异常逃出构造函数。
+            if (headerBlock.Length - CryptoService.NonceLen < CryptoService.TagLen)
+                throw new ArchiveCorruptedException("加密归档的 header 长度无效。");
             if (password is null)
                 throw new InvalidPasswordException();
             var salt = fixedHeader.AsSpan(6).ToArray();

@@ -30,9 +30,16 @@ public static class MwrFormat
     public static byte[] Serialize(List<EntryMeta> entries)
         => JsonSerializer.SerializeToUtf8Bytes(entries, Options);
 
-    /// <summary>从 UTF-8 JSON 反序列化条目元数据表。</summary>
+    /// <summary>
+    /// 从 UTF-8 JSON 反序列化条目元数据表。未加密归档的 header 是攻击者可控的，
+    /// 可能含 null 元素；过滤掉，避免读取时 NullReferenceException。
+    /// </summary>
     public static List<EntryMeta> Deserialize(byte[] bytes)
-        => JsonSerializer.Deserialize<List<EntryMeta>>(bytes, Options) ?? new List<EntryMeta>();
+    {
+        var entries = JsonSerializer.Deserialize<List<EntryMeta>>(bytes, Options) ?? new List<EntryMeta>();
+        entries.RemoveAll(e => e is null);
+        return entries;
+    }
 }
 
 /// <summary>单个归档条目的元数据（与 Rust 版 EntryMeta 字段一一对应）。</summary>

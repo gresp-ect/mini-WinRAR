@@ -150,6 +150,35 @@ public class MwrReaderTests
     }
 
     [Fact]
+    public void EncryptedHeaderLen13To27_ThrowsArchiveCorruptedException_NotArgumentOutOfRange()
+    {
+        // headerLen ∈ [13, 27]：> nonce(12) 但 < nonce+tag(28)。若不拦截，密文 1..15B 会在
+        // Decrypt 的 ciphertext[..负值] 处抛 ArgumentOutOfRangeException（捕不到）。
+        var archive = Concat(FixedHeader(MwrFormat.FlagEncrypted), UInt64Le(13));
+        using var ms = new MemoryStream(archive);
+        var ex = Record.Exception(() => new MwrReader(ms, "anypass"));
+        Assert.IsType<ArchiveCorruptedException>(ex);
+        Assert.IsNotType<ArgumentOutOfRangeException>(ex);
+    }
+
+    [Fact]
+    public void NullEntryInHeader_IsFiltered_NoNullReference()
+    {
+        var entries = new List<EntryMeta>
+        {
+            null!, // 攻击者构造的 null 元素
+            new() { Name = "a.txt", UncompressedSize = 0, CompressedSize = 0, Mtime = 0, IsDir = false, DataOffset = 22, Nonce = Array.Empty<byte>(), Crc32 = 0 },
+        };
+        var header = MwrFormat.Serialize(entries);
+        var archive = Concat(FixedHeader(0), header, UInt64Le((ulong)header.Length));
+        using var ms = new MemoryStream(archive);
+        using var reader = new MwrReader(ms, null);
+        var entry = Assert.Single(reader.Entries);
+        Assert.Equal("a.txt", entry.Name);
+        Assert.Empty(reader.ReadFile(0));
+    }
+
+    [Fact]
     public void BadMagic_ThrowsArchiveCorruptedException()
     {
         var archive = Concat("XXXX"u8.ToArray(), FixedHeader(0).AsSpan(4).ToArray(), UInt64Le(4));
