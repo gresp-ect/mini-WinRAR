@@ -1,13 +1,8 @@
+using MiniWinRAR.Core.Archive;
 using MiniWinRAR.Core.Crypto;
 using ZstdSharp;
 
 namespace MiniWinRAR.Core.Mwr;
-
-/// <summary>
-/// 压缩级别。与 Rust 版 <c>CompressionLevel</c> 一一对应：
-/// Store→0 / Fast→3 / Best→19（zstd level）。Task 6 会将其合并进 ArchiveModels，此处保持同名三变体。
-/// </summary>
-public enum CompressionLevel { Store, Fast, Best }
 
 /// <summary>
 /// 写入 .mwr 归档。布局与 Rust 版一致：

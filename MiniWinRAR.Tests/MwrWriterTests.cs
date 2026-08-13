@@ -1,4 +1,5 @@
 using System.Text;
+using MiniWinRAR.Core.Archive;
 using MiniWinRAR.Core.Crypto;
 using MiniWinRAR.Core.Mwr;
 using ZstdSharp;
