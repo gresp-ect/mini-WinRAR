@@ -43,6 +43,10 @@ public static class ShellIcon
     public static Icon? GetIconForFile(string fullPath)
         => GetIconCore(fullPath, isDirectory: false, useFileAttributes: false);
 
+    /// <summary>读取真实目录的系统图标：特殊/已知文件夹（桌面、音乐、下载等）返回专属图标，普通目录返回通用文件夹图标；失败返回 null。</summary>
+    public static Icon? GetIconForDirectory(string fullPath)
+        => GetIconCore(fullPath, isDirectory: true, useFileAttributes: false);
+
     private static Icon? GetIconCore(string path, bool isDirectory, bool useFileAttributes)
     {
         var info = new ShFileInfo();

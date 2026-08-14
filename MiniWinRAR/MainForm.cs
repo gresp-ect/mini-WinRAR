@@ -279,7 +279,7 @@ public sealed class MainForm : Form
             var parent = Directory.GetParent(_currentDir);
             if (parent != null)
             {
-                var up = new ListViewItem("..") { ImageIndex = IconIndexFor("", isDirectory: true) };
+                var up = new ListViewItem("..") { ImageIndex = IconIndexForDirectory(parent.FullName) };
                 up.SubItems.Add("");          // 大小
                 up.SubItems.Add("文件夹");    // 类型
                 up.SubItems.Add("");          // 修改时间
@@ -352,6 +352,18 @@ public sealed class MainForm : Form
         return idx;
     }
 
+    /// <summary>取真实目录的系统图标（特殊文件夹如桌面/音乐/下载显示专属图标），按完整路径缓存。</summary>
+    private int IconIndexForDirectory(string fullPath)
+    {
+        var key = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (_iconIndex.TryGetValue(key, out var idx)) return idx;
+        var icon = ShellIcon.GetIconForDirectory(key) ?? SystemIcons.WinLogo;
+        _fileIcons.Images.Add(icon);
+        idx = _fileIcons.Images.Count - 1;
+        _iconIndex[key] = idx;
+        return idx;
+    }
+
     private void AddDirectory(string fullPath)
     {
         var name = Path.GetFileName(fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
@@ -359,7 +371,7 @@ public sealed class MainForm : Form
         try { mtime = Directory.GetLastWriteTime(fullPath).ToString("yyyy-MM-dd HH:mm"); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { mtime = ""; }
 
-        var item = new ListViewItem(name) { ImageIndex = IconIndexFor("", isDirectory: true) };
+        var item = new ListViewItem(name) { ImageIndex = IconIndexForDirectory(fullPath) };
         item.SubItems.Add("");                     // 大小
         item.SubItems.Add("文件夹");               // 类型
         item.SubItems.Add(mtime);                  // 修改时间
