@@ -56,6 +56,7 @@ public sealed class ExtractDialog : Form
         _targetBox.TextChanged += (_, _) => _okButton.Enabled = !string.IsNullOrWhiteSpace(_targetBox.Text);
 
         _browseButton.Text = "浏览(&B)...";
+        _browseButton.Anchor = AnchorStyles.None; // 单元格内居中，与文本框垂直对齐（确定/取消按钮同此技巧）
         _browseButton.Margin = new Padding(0, 0, 0, 8);
         _browseButton.Click += OnBrowse;
 
@@ -98,14 +99,14 @@ public sealed class ExtractDialog : Form
     {
         Text = "解压到";
         StartPosition = FormStartPosition.CenterParent;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
+        FormBorderStyle = FormBorderStyle.Sizable; // 可拖拽改变大小（原 FixedDialog 固定尺寸）
         MaximizeBox = false;
         MinimizeBox = false;
         ShowInTaskbar = false;
         AcceptButton = _okButton;
         CancelButton = _cancelButton;
-        Size = new Size(480, 150);
-        MinimumSize = new Size(420, 140);
+        Size = new Size(520, 160);
+        MinimumSize = new Size(440, 150);
     }
 
     private void OnBrowse(object? sender, EventArgs e)

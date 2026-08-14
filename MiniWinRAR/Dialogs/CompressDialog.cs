@@ -123,14 +123,14 @@ public sealed class CompressDialog : Form
     {
         Text = DescribeTitle();
         StartPosition = FormStartPosition.CenterParent;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
+        FormBorderStyle = FormBorderStyle.Sizable; // 可拖拽改变大小（原 FixedDialog 固定尺寸）
         MaximizeBox = false;
         MinimizeBox = false;
         ShowInTaskbar = false;
         AcceptButton = _okButton;
         CancelButton = _cancelButton;
-        Size = new Size(460, 230);
-        MinimumSize = new Size(420, 210);
+        Size = new Size(480, 240);
+        MinimumSize = new Size(440, 220);
     }
 
     private void OnOk(object? sender, EventArgs e)
