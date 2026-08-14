@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 
 namespace MiniWinRAR;
@@ -11,6 +12,18 @@ internal interface IShellItemImageFactory
 
 [StructLayout(LayoutKind.Sequential)]
 internal struct NativeSize { public int cx, cy; }
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct BitmapInfo
+{
+    public int bmType;
+    public int bmWidth;
+    public int bmHeight;
+    public int bmWidthBytes;
+    public ushort bmPlanes;
+    public ushort bmBitsPixel;
+    public IntPtr bmBits;
+}
 
 /// <summary>
 /// 从 Windows Shell（shell32）获取文件/目录的系统图标，与资源管理器显示一致。
@@ -47,6 +60,9 @@ public static class ShellIcon
         ref Guid riid, out IntPtr ppv);
 
     [DllImport("gdi32.dll")]
+    private static extern int GetObject(IntPtr hgdiobj, int cbBuffer, out BitmapInfo lpvObject);
+
+    [DllImport("gdi32.dll")]
     private static extern bool DeleteObject(IntPtr hObject);
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -79,7 +95,7 @@ public static class ShellIcon
             return null;
         try
         {
-            using var bmp = Bitmap.FromHbitmap(hbmp);
+            using var bmp = FromHbitmapPreserveAlpha(hbmp);
             using var icon = Icon.FromHandle(bmp.GetHicon());
             return (Icon)icon.Clone();
         }
@@ -87,6 +103,23 @@ public static class ShellIcon
         {
             DeleteObject(hbmp);
         }
+    }
+
+    /// <summary>从 HBITMAP 构造保留 alpha 通道的位图。FromHbitmap 会把 32bpp 透明区画成黑色，故用像素指针直接包装 Format32bppArgb。</summary>
+    private static Bitmap FromHbitmapPreserveAlpha(IntPtr hbmp)
+    {
+        if (GetObject(hbmp, Marshal.SizeOf<BitmapInfo>(), out var bi) != 0
+            && bi.bmBitsPixel == 32 && bi.bmBits != IntPtr.Zero)
+        {
+            var wrapped = new Bitmap(bi.bmWidth, bi.bmHeight, bi.bmWidth * 4,
+                PixelFormat.Format32bppArgb, bi.bmBits); // 不拥有 bmBits（外部 HBITMAP）
+            var copy = new Bitmap(wrapped);               // 复制为独立内存，保留 alpha
+            wrapped.Dispose();
+            return copy;
+        }
+        // 非 32bpp 兜底
+        using var fromHbitmap = Bitmap.FromHbitmap(hbmp);
+        return new Bitmap(fromHbitmap);
     }
 
     private static Icon? GetIconCore(string path, bool isDirectory, bool useFileAttributes, int size)
