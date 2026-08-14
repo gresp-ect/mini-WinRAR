@@ -22,6 +22,11 @@ public sealed class MainForm : Form
     private readonly ListView _fileList = new();
     private readonly ImageList _fileIcons = new() { ColorDepth = ColorDepth.Depth32Bit, ImageSize = new Size(16, 16) };
     private readonly Dictionary<string, int> _iconIndex = new(StringComparer.OrdinalIgnoreCase);
+
+    // 缩放：三档（小/中/大），Ctrl+滚轮切换；图标与文字同步缩放，保持 Details 布局
+    private static readonly int[] ZoomIconSizes = { 16, 32, 48 };
+    private static readonly float[] ZoomFontSizes = { 8.25f, 10f, 12f };
+    private int _zoomLevel;
     private readonly ToolStripStatusLabel _statusPath = new();
     private readonly ToolStripStatusLabel _statusInfo = new();
 
@@ -181,6 +186,7 @@ public sealed class MainForm : Form
         _fileList.ItemActivate += OnFileListActivate;
         _fileList.SelectedIndexChanged += (_, _) => { UpdateStatus(); UpdateOperationButtons(); };
         _fileList.KeyDown += OnFileListKeyDown;
+        _fileList.MouseWheel += OnListMouseWheel; // Ctrl+滚轮缩放
         _fileList.DragEnter += OnDragEnter;
         _fileList.DragDrop += OnDragDrop;
         Controls.Add(_fileList);
@@ -328,12 +334,35 @@ public sealed class MainForm : Form
         UpdateStatus(listingError);
     }
 
+    /// <summary>Ctrl+滚轮缩放：上滚放大一档，下滚缩小一档；纯滚轮仍滚动列表。</summary>
+    private void OnListMouseWheel(object? sender, MouseEventArgs e)
+    {
+        if ((Control.ModifierKeys & Keys.Control) != 0)
+        {
+            ApplyZoom(_zoomLevel + (e.Delta > 0 ? 1 : -1));
+            if (e is HandledMouseEventArgs handled) handled.Handled = true; // 阻止滚动
+        }
+    }
+
+    /// <summary>应用缩放级别：同步调整文字字号与图标尺寸，重建图标缓存并重列。</summary>
+    private void ApplyZoom(int level)
+    {
+        var target = Math.Clamp(level, 0, ZoomIconSizes.Length - 1);
+        if (target == _zoomLevel) return;
+        _zoomLevel = target;
+        _fileList.Font = new Font(_fileList.Font.FontFamily, ZoomFontSizes[_zoomLevel]);
+        _fileIcons.ImageSize = new Size(ZoomIconSizes[_zoomLevel], ZoomIconSizes[_zoomLevel]);
+        _fileIcons.Images.Clear();
+        _iconIndex.Clear();
+        RefreshView(); // 按新尺寸重取图标并重调列宽
+    }
+
     /// <summary>取扩展名（或文件夹）对应的系统类型图标在 ImageList 中的索引，按需获取并缓存（用于目录、归档条目）。</summary>
     private int IconIndexFor(string extension, bool isDirectory)
     {
         var key = isDirectory ? "\\folder" : extension; // 文件夹一个图标；文件按扩展名
         if (_iconIndex.TryGetValue(key, out var idx)) return idx;
-        var icon = ShellIcon.GetIcon(isDirectory ? _currentDir : "*" + extension, isDirectory)
+        var icon = ShellIcon.GetIcon(isDirectory ? _currentDir : "*" + extension, isDirectory, ZoomIconSizes[_zoomLevel])
                    ?? SystemIcons.WinLogo;
         _fileIcons.Images.Add(icon);
         idx = _fileIcons.Images.Count - 1;
@@ -345,7 +374,7 @@ public sealed class MainForm : Form
     private int IconIndexForFile(string fullPath)
     {
         if (_iconIndex.TryGetValue(fullPath, out var idx)) return idx;
-        var icon = ShellIcon.GetIconForFile(fullPath) ?? SystemIcons.WinLogo;
+        var icon = ShellIcon.GetIconForFile(fullPath, ZoomIconSizes[_zoomLevel]) ?? SystemIcons.WinLogo;
         _fileIcons.Images.Add(icon);
         idx = _fileIcons.Images.Count - 1;
         _iconIndex[fullPath] = idx;
@@ -357,7 +386,7 @@ public sealed class MainForm : Form
     {
         var key = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         if (_iconIndex.TryGetValue(key, out var idx)) return idx;
-        var icon = ShellIcon.GetIconForDirectory(key) ?? SystemIcons.WinLogo;
+        var icon = ShellIcon.GetIconForDirectory(key, ZoomIconSizes[_zoomLevel]) ?? SystemIcons.WinLogo;
         _fileIcons.Images.Add(icon);
         idx = _fileIcons.Images.Count - 1;
         _iconIndex[key] = idx;
