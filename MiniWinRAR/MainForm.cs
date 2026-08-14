@@ -176,7 +176,7 @@ public sealed class MainForm : Form
         _fileList.Columns.Add("类型", 150);
         _fileList.Columns.Add("修改时间", 170);
         _fileList.ItemActivate += OnFileListActivate;
-        _fileList.SelectedIndexChanged += (_, _) => UpdateStatus();
+        _fileList.SelectedIndexChanged += (_, _) => { UpdateStatus(); UpdateOperationButtons(); };
         _fileList.KeyDown += OnFileListKeyDown;
         _fileList.DragEnter += OnDragEnter;
         _fileList.DragDrop += OnDragDrop;
@@ -508,13 +508,14 @@ public sealed class MainForm : Form
     private void UpdateOperationButtons()
     {
         var idle = !_operationBusy;
-        var inArchive = _archivePath != null && idle;
+        // 解压在「已打开归档」或「文件系统模式下选中一个归档文件」时可用
+        var canExtract = (_archivePath != null || SelectedArchivePath() != null) && idle;
         _toolCompress.Enabled = idle;
         _toolOpenArchive.Enabled = idle;
         _compressItem.Enabled = idle;
         _openArchiveItem.Enabled = idle;
-        _toolExtract.Enabled = inArchive;
-        _extractItem.Enabled = inArchive;
+        _toolExtract.Enabled = canExtract;
+        _extractItem.Enabled = canExtract;
     }
 
     // ---- 事件 ----
@@ -609,14 +610,16 @@ public sealed class MainForm : Form
     private async void OnExtract()
     {
         if (_operationBusy) return;
-        if (_archivePath == null || _archiveService == null) return;
-        using var dlg = new ExtractDialog(_archiveEncrypted);
+        var archivePath = _archivePath ?? SelectedArchivePath();
+        if (archivePath == null) return;
+        // 归档模式用已知的加密标记；文件系统模式下选中归档是否加密未知，密码框始终启用
+        var isEncrypted = _archivePath != null ? _archiveEncrypted : true;
+        using var dlg = new ExtractDialog(isEncrypted);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         var targetDir = dlg.TargetDirectory;
         var password = dlg.Password ?? _archivePassword; // 未填则复用打开归档时的密码
 
-        var service = _archiveService;
-        var archivePath = _archivePath;
+        var service = _archiveService ?? CreateService(archivePath);
         var result = await RunArchiveOperation("正在解压...",
             (p, ct) => service.Extract(archivePath, targetDir, password, null, p, ct));
         var error = result.Error;
@@ -877,6 +880,15 @@ public sealed class MainForm : Form
         }
         if (paths.Count == 0) paths.Add(_currentDir);
         return paths;
+    }
+
+    /// <summary>文件系统模式下，选中项恰好是一个 .zip/.mwr 文件时返回其完整路径；否则返回 null（归档模式下由打开路径接管）。</summary>
+    private string? SelectedArchivePath()
+    {
+        if (_archivePath != null) return null;
+        if (_fileList.SelectedItems.Count != 1) return null;
+        if (_fileList.SelectedItems[0].Tag is not EntryTag tag || tag.IsUp || tag.IsDir) return null;
+        return ArchivePath.IsArchive(tag.FullPath) ? tag.FullPath : null;
     }
 
     private static IArchiveService CreateService(string path)
