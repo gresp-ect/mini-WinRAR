@@ -56,7 +56,7 @@ public sealed class ExtractDialog : Form
         _targetBox.TextChanged += (_, _) => _okButton.Enabled = !string.IsNullOrWhiteSpace(_targetBox.Text);
 
         _browseButton.Text = "浏览(&B)...";
-        _browseButton.Anchor = AnchorStyles.None; // 单元格内居中，与文本框垂直对齐（确定/取消按钮同此技巧）
+        _browseButton.Dock = DockStyle.Fill; // 与目标目录输入框等高（同填满单元格行高），避免遮挡
         _browseButton.Margin = new Padding(0, 0, 0, 8);
         _browseButton.Click += OnBrowse;
 
