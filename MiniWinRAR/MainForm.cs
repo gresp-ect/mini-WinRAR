@@ -20,6 +20,8 @@ public sealed class MainForm : Form
     private readonly ComboBox _addressBox = new();
     private readonly Button _goButton = new();
     private readonly ListView _fileList = new();
+    private readonly ImageList _fileIcons = new() { ColorDepth = ColorDepth.Depth32Bit, ImageSize = new Size(16, 16) };
+    private readonly Dictionary<string, int> _iconIndex = new(StringComparer.OrdinalIgnoreCase);
     private readonly ToolStripStatusLabel _statusPath = new();
     private readonly ToolStripStatusLabel _statusInfo = new();
 
@@ -167,6 +169,7 @@ public sealed class MainForm : Form
     {
         _fileList.Dock = DockStyle.Fill;
         _fileList.View = View.Details;
+        _fileList.SmallImageList = _fileIcons; // 系统图标（与资源管理器一致）
         _fileList.FullRowSelect = true;
         _fileList.MultiSelect = true;
         _fileList.HideSelection = false;
@@ -276,7 +279,7 @@ public sealed class MainForm : Form
             var parent = Directory.GetParent(_currentDir);
             if (parent != null)
             {
-                var up = new ListViewItem("..");
+                var up = new ListViewItem("..") { ImageIndex = IconIndexFor("", isDirectory: true) };
                 up.SubItems.Add("");          // 大小
                 up.SubItems.Add("文件夹");    // 类型
                 up.SubItems.Add("");          // 修改时间
@@ -325,6 +328,19 @@ public sealed class MainForm : Form
         UpdateStatus(listingError);
     }
 
+    /// <summary>取扩展名（或文件夹）对应的系统图标在 ImageList 中的索引，按需获取并缓存。</summary>
+    private int IconIndexFor(string extension, bool isDirectory)
+    {
+        var key = isDirectory ? "\\folder" : extension; // 文件夹一个图标；文件按扩展名
+        if (_iconIndex.TryGetValue(key, out var idx)) return idx;
+        var icon = ShellIcon.GetIcon(isDirectory ? _currentDir : "*" + extension, isDirectory)
+                   ?? SystemIcons.WinLogo;
+        _fileIcons.Images.Add(icon);
+        idx = _fileIcons.Images.Count - 1;
+        _iconIndex[key] = idx;
+        return idx;
+    }
+
     private void AddDirectory(string fullPath)
     {
         var name = Path.GetFileName(fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
@@ -332,7 +348,7 @@ public sealed class MainForm : Form
         try { mtime = Directory.GetLastWriteTime(fullPath).ToString("yyyy-MM-dd HH:mm"); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { mtime = ""; }
 
-        var item = new ListViewItem("📁  " + name);
+        var item = new ListViewItem(name) { ImageIndex = IconIndexFor("", isDirectory: true) };
         item.SubItems.Add("");                     // 大小
         item.SubItems.Add("文件夹");               // 类型
         item.SubItems.Add(mtime);                  // 修改时间
@@ -346,7 +362,7 @@ public sealed class MainForm : Form
         try
         {
             var fi = new FileInfo(fullPath);
-            var item = new ListViewItem(fi.Name);
+            var item = new ListViewItem(fi.Name) { ImageIndex = IconIndexFor(fi.Extension, isDirectory: false) };
             item.SubItems.Add(FormatSize(fi.Length));                       // 大小
             item.SubItems.Add(GetTypeText(fi.Extension));                   // 类型
             item.SubItems.Add(fi.LastWriteTime.ToString("yyyy-MM-dd HH:mm")); // 修改时间
@@ -447,7 +463,7 @@ public sealed class MainForm : Form
             _fileList.Items.Clear();
 
             // 返回上级项：退回归档所在目录的文件系统视图
-            var up = new ListViewItem("..");
+            var up = new ListViewItem("..") { ImageIndex = IconIndexFor("", isDirectory: true) };
             up.SubItems.Add("");          // 大小
             up.SubItems.Add("文件夹");    // 类型
             up.SubItems.Add("");          // 修改时间
@@ -458,7 +474,10 @@ public sealed class MainForm : Form
                          .OrderBy(e => e.IsDir ? 0 : 1)
                          .ThenBy(e => e.Name, StringComparer.CurrentCultureIgnoreCase))
             {
-                var item = new ListViewItem((entry.IsDir ? "📁  " : "") + entry.Name);
+                var item = new ListViewItem(entry.Name)
+                {
+                    ImageIndex = IconIndexFor(Path.GetExtension(entry.Name), entry.IsDir),
+                };
                 item.SubItems.Add(entry.IsDir ? "" : FormatSize(entry.Size));   // 大小
                 var typeText = entry.IsDir ? "文件夹" : GetTypeText(Path.GetExtension(entry.Name));
                 if (entry.IsEncrypted) typeText += "（加密）";                   // 类型
