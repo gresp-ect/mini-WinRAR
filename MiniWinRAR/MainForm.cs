@@ -612,9 +612,9 @@ public sealed class MainForm : Form
         if (_operationBusy) return;
         var archivePath = _archivePath ?? SelectedArchivePath();
         if (archivePath == null) return;
-        // 归档模式用已知的加密标记；文件系统模式下选中归档是否加密未知，密码框始终启用
-        var isEncrypted = _archivePath != null ? _archiveEncrypted : true;
-        using var dlg = new ExtractDialog(isEncrypted);
+        // 归档模式用已知的加密标记；文件系统模式下探测归档是否加密，决定是否渲染密码框
+        var needsPassword = _archivePath != null ? _archiveEncrypted : ArchiveProbe.IsEncrypted(archivePath);
+        using var dlg = new ExtractDialog(needsPassword);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         var targetDir = dlg.TargetDirectory;
         var password = dlg.Password ?? _archivePassword; // 未填则复用打开归档时的密码

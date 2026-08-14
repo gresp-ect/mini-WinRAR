@@ -6,7 +6,7 @@ namespace MiniWinRAR;
 
 /// <summary>
 /// 解压设置对话框：选择目标目录与（可选）密码。
-/// 密码仅当归档加密时可用（构造参数 isEncrypted）；未加密时输入框禁用、Password 返回 null。
+/// 仅当归档需要密码（构造参数 needsPassword）时渲染密码输入行；否则整行不显示、Password 返回 null。
 /// 代码式布局，无 Designer/.resx。模态调用：ShowDialog 返回 OK 后读取 TargetDirectory/Password。
 /// </summary>
 public sealed class ExtractDialog : Form
@@ -16,11 +16,11 @@ public sealed class ExtractDialog : Form
     private readonly TextBox _passwordBox = new();
     private readonly Button _okButton = new();
     private readonly Button _cancelButton = new();
-    private readonly bool _isEncrypted;
+    private readonly bool _needsPassword;
 
-    public ExtractDialog(bool isEncrypted)
+    public ExtractDialog(bool needsPassword)
     {
-        _isEncrypted = isEncrypted;
+        _needsPassword = needsPassword;
         BuildUi();
         ConfigureForm();
     }
@@ -28,19 +28,21 @@ public sealed class ExtractDialog : Form
     /// <summary>解压目标目录（去首尾空白）。</summary>
     public string TargetDirectory => _targetBox.Text.Trim();
 
-    /// <summary>加密归档且填写密码时为密码，否则为 null（无密码）。</summary>
-    public string? Password => _passwordBox.Enabled && !string.IsNullOrWhiteSpace(_passwordBox.Text)
+    /// <summary>归档需要密码且填写密码时为密码，否则为 null（无密码）。</summary>
+    public string? Password => _needsPassword && !string.IsNullOrWhiteSpace(_passwordBox.Text)
         ? _passwordBox.Text
         : null;
 
     private void BuildUi()
     {
-        var table = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12, 12, 12, 4), ColumnCount = 3, RowCount = 3 };
+        // 行：目标目录 + [密码（仅需要时）] + 撑开
+        var rowCount = _needsPassword ? 3 : 2;
+        var table = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12, 12, 12, 4), ColumnCount = 3, RowCount = rowCount };
         table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         table.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 目标目录
-        table.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 密码
+        if (_needsPassword) table.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 密码
         table.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // 撑开
 
         var targetLabel = new Label
@@ -64,24 +66,24 @@ public sealed class ExtractDialog : Form
         table.Controls.Add(_targetBox, 1, 0);
         table.Controls.Add(_browseButton, 2, 0);
 
-        var passwordLabel = new Label
+        // 归档需要密码时才渲染密码行（整行不显示，而非靠窗口大小隐藏）
+        if (_needsPassword)
         {
-            Text = "密码(&P):",
-            AutoSize = true,
-            Anchor = AnchorStyles.Left,
-            TextAlign = ContentAlignment.MiddleLeft,
-            Margin = new Padding(0, 0, 8, 0),
-        };
-        _passwordBox.Dock = DockStyle.Fill;
-        _passwordBox.UseSystemPasswordChar = true;
+            var passwordLabel = new Label
+            {
+                Text = "密码(&P):",
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0, 0, 8, 0),
+            };
+            _passwordBox.Dock = DockStyle.Fill;
+            _passwordBox.UseSystemPasswordChar = true;
 
-        // 未加密归档：禁用密码输入（Password 属性随之返回 null）
-        passwordLabel.Enabled = _isEncrypted;
-        _passwordBox.Enabled = _isEncrypted;
-
-        table.Controls.Add(passwordLabel, 0, 1);
-        table.Controls.Add(_passwordBox, 1, 1);
-        table.SetColumnSpan(_passwordBox, 2);
+            table.Controls.Add(passwordLabel, 0, 1);
+            table.Controls.Add(_passwordBox, 1, 1);
+            table.SetColumnSpan(_passwordBox, 2);
+        }
 
         _okButton.Text = "确定(&O)";
         _okButton.AutoSize = true;
