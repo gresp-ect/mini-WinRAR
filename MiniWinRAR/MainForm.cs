@@ -328,7 +328,7 @@ public sealed class MainForm : Form
         UpdateStatus(listingError);
     }
 
-    /// <summary>取扩展名（或文件夹）对应的系统图标在 ImageList 中的索引，按需获取并缓存。</summary>
+    /// <summary>取扩展名（或文件夹）对应的系统类型图标在 ImageList 中的索引，按需获取并缓存（用于目录、归档条目）。</summary>
     private int IconIndexFor(string extension, bool isDirectory)
     {
         var key = isDirectory ? "\\folder" : extension; // 文件夹一个图标；文件按扩展名
@@ -338,6 +338,17 @@ public sealed class MainForm : Form
         _fileIcons.Images.Add(icon);
         idx = _fileIcons.Images.Count - 1;
         _iconIndex[key] = idx;
+        return idx;
+    }
+
+    /// <summary>取真实文件自身的系统图标（含内嵌图标，与资源管理器一致），按完整路径缓存。</summary>
+    private int IconIndexForFile(string fullPath)
+    {
+        if (_iconIndex.TryGetValue(fullPath, out var idx)) return idx;
+        var icon = ShellIcon.GetIconForFile(fullPath) ?? SystemIcons.WinLogo;
+        _fileIcons.Images.Add(icon);
+        idx = _fileIcons.Images.Count - 1;
+        _iconIndex[fullPath] = idx;
         return idx;
     }
 
@@ -362,7 +373,7 @@ public sealed class MainForm : Form
         try
         {
             var fi = new FileInfo(fullPath);
-            var item = new ListViewItem(fi.Name) { ImageIndex = IconIndexFor(fi.Extension, isDirectory: false) };
+            var item = new ListViewItem(fi.Name) { ImageIndex = IconIndexForFile(fi.FullName) };
             item.SubItems.Add(FormatSize(fi.Length));                       // 大小
             item.SubItems.Add(GetTypeText(fi.Extension));                   // 类型
             item.SubItems.Add(fi.LastWriteTime.ToString("yyyy-MM-dd HH:mm")); // 修改时间
