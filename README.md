@@ -94,4 +94,4 @@ dotnet test
 
 ## 许可证
 
-保留所有权利。仅供个人学习 / 使用，未经许可不得用于商业分发。
+[MIT License](LICENSE)
