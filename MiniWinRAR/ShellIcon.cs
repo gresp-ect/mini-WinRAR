@@ -3,6 +3,15 @@ using System.Runtime.InteropServices;
 
 namespace MiniWinRAR;
 
+[ComImport, Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IShellItemImageFactory
+{
+    [PreserveSig] int GetImage(NativeSize size, int flags, out IntPtr hBitmap);
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeSize { public int cx, cy; }
+
 /// <summary>
 /// 从 Windows Shell（shell32）获取文件/目录的系统图标，与资源管理器显示一致。
 /// 用 SHGetFileInfo 直接返回 hIcon：16px 用 SHGFI_SMALLICON，更大用默认大图标（32px，由 ImageList 按需放大）。
@@ -16,6 +25,8 @@ public static class ShellIcon
     private const uint ShgfiUseFileAttributes = 0x10;  // SHGFI_USEFILEATTRIBUTES
     private const uint FileAttributeDirectory = 0x10;  // FILE_ATTRIBUTE_DIRECTORY
     private const uint FileAttributeNormal = 0x80;     // FILE_ATTRIBUTE_NORMAL
+    private const int SiiGbfIconOnly = 0x04;            // SIIGBF_ICONONLY
+    private const int SiiGbfBiggerSizeOk = 0x01;        // SIIGBF_BIGGERSIZEOK
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
     private struct ShFileInfo
@@ -30,6 +41,13 @@ public static class ShellIcon
     [DllImport("shell32.dll", CharSet = CharSet.Auto)]
     private static extern IntPtr SHGetFileInfo(string pszPath, uint dwFileAttributes,
         ref ShFileInfo psfi, uint cbFileInfo, uint uFlags);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern int SHCreateItemFromParsingName(string pszPath, IntPtr pbc,
+        ref Guid riid, out IntPtr ppv);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr hObject);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyIcon(IntPtr hIcon);
@@ -48,6 +66,28 @@ public static class ShellIcon
     /// <summary>读取真实目录的系统图标：特殊/已知文件夹（桌面、音乐、下载等）返回专属图标，普通目录返回通用文件夹图标；失败返回 null。</summary>
     public static Icon? GetIconForDirectory(string fullPath, int size = 16)
         => GetIconCore(fullPath, isDirectory: true, useFileAttributes: false, size);
+
+    /// <summary>用 IShellItemImageFactory 获取真实路径对象在指定尺寸下的清晰系统图标（16/32/48 各档位原生清晰，非拉伸）；失败返回 null。</summary>
+    public static Icon? GetIconForPathSharp(string fullPath, int size)
+    {
+        var iid = new Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b"); // IID_IShellItemImageFactory
+        if (SHCreateItemFromParsingName(fullPath, IntPtr.Zero, ref iid, out var ppv) != 0 || ppv == IntPtr.Zero)
+            return null;
+        var factory = (IShellItemImageFactory)Marshal.GetTypedObjectForIUnknown(ppv, typeof(IShellItemImageFactory));
+        var sz = new NativeSize { cx = size, cy = size };
+        if (factory.GetImage(sz, SiiGbfIconOnly | SiiGbfBiggerSizeOk, out var hbmp) != 0 || hbmp == IntPtr.Zero)
+            return null;
+        try
+        {
+            using var bmp = Bitmap.FromHbitmap(hbmp);
+            using var icon = Icon.FromHandle(bmp.GetHicon());
+            return (Icon)icon.Clone();
+        }
+        finally
+        {
+            DeleteObject(hbmp);
+        }
+    }
 
     private static Icon? GetIconCore(string path, bool isDirectory, bool useFileAttributes, int size)
     {

@@ -370,23 +370,29 @@ public sealed class MainForm : Form
         return idx;
     }
 
-    /// <summary>取真实文件自身的系统图标（含内嵌图标，与资源管理器一致），按完整路径缓存。</summary>
+    /// <summary>取真实文件自身的系统图标（含内嵌图标，与资源管理器一致；当前缩放档位下原生清晰），按完整路径缓存。</summary>
     private int IconIndexForFile(string fullPath)
     {
         if (_iconIndex.TryGetValue(fullPath, out var idx)) return idx;
-        var icon = ShellIcon.GetIconForFile(fullPath, ZoomIconSizes[_zoomLevel]) ?? SystemIcons.WinLogo;
+        var size = ZoomIconSizes[_zoomLevel];
+        var icon = ShellIcon.GetIconForPathSharp(fullPath, size)
+                   ?? ShellIcon.GetIconForFile(fullPath, size)
+                   ?? SystemIcons.WinLogo;
         _fileIcons.Images.Add(icon);
         idx = _fileIcons.Images.Count - 1;
         _iconIndex[fullPath] = idx;
         return idx;
     }
 
-    /// <summary>取真实目录的系统图标（特殊文件夹如桌面/音乐/下载显示专属图标），按完整路径缓存。</summary>
+    /// <summary>取真实目录的系统图标（特殊文件夹如桌面/音乐/下载显示专属图标；当前缩放档位下原生清晰），按完整路径缓存。</summary>
     private int IconIndexForDirectory(string fullPath)
     {
         var key = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         if (_iconIndex.TryGetValue(key, out var idx)) return idx;
-        var icon = ShellIcon.GetIconForDirectory(key, ZoomIconSizes[_zoomLevel]) ?? SystemIcons.WinLogo;
+        var size = ZoomIconSizes[_zoomLevel];
+        var icon = ShellIcon.GetIconForPathSharp(key, size)
+                   ?? ShellIcon.GetIconForDirectory(key, size)
+                   ?? SystemIcons.WinLogo;
         _fileIcons.Images.Add(icon);
         idx = _fileIcons.Images.Count - 1;
         _iconIndex[key] = idx;
