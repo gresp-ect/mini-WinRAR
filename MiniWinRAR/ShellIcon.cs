@@ -115,6 +115,7 @@ public static class ShellIcon
                 PixelFormat.Format32bppArgb, bi.bmBits); // 不拥有 bmBits（外部 HBITMAP）
             var copy = new Bitmap(wrapped);               // 复制为独立内存，保留 alpha
             wrapped.Dispose();
+            copy.RotateFlip(RotateFlipType.RotateNoneFlipY); // GDI 位图 bottom-up：包装按 top-down 读会上下颠倒，需翻转
             return copy;
         }
         // 非 32bpp 兜底
